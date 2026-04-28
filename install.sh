@@ -42,10 +42,34 @@ Options:
   --alert-cooldown N       Minimum minutes between repeated alerts (default: 30)
   --silent                 Send Telegram messages silently
   --no-run-now             Install timer but do not send the first report now
+  --uninstall              Remove installed services, timers, config, and state
   -h, --help               Show this help
 
 You can also set PI_REPORT_TELEGRAM_BOT_TOKEN and PI_REPORT_TELEGRAM_CHAT_ID.
 USAGE
+}
+
+uninstall_app() {
+  echo "Uninstalling ${APP_NAME}..."
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now "${APP_NAME}.timer" >/dev/null 2>&1 || true
+    systemctl disable --now "${APP_NAME}-alert.timer" >/dev/null 2>&1 || true
+    systemctl stop "${APP_NAME}.service" >/dev/null 2>&1 || true
+    systemctl stop "${APP_NAME}-alert.service" >/dev/null 2>&1 || true
+  fi
+
+  rm -f "$SERVICE_FILE" "$TIMER_FILE" "$ALERT_SERVICE_FILE" "$ALERT_TIMER_FILE"
+  rm -f "$CONFIG_FILE"
+  rm -rf "$INSTALL_DIR" "$STATE_DIR"
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload
+    systemctl reset-failed "${APP_NAME}.service" "${APP_NAME}.timer" \
+      "${APP_NAME}-alert.service" "${APP_NAME}-alert.timer" >/dev/null 2>&1 || true
+  fi
+
+  echo "Uninstalled ${APP_NAME}."
 }
 
 escape_env_value() {
@@ -77,11 +101,11 @@ prompt_secret() {
   local answer
 
   if [[ -n "$current" ]]; then
-    read -r -s -p "${prompt} [keep existing, hidden]: " answer
+    read -r -s -p "${prompt} [keep existing, hidden input]: " answer
     echo >&2
     printf '%s' "${answer:-$current}"
   else
-    read -r -s -p "${prompt}: " answer
+    read -r -s -p "${prompt} [hidden input]: " answer
     echo >&2
     printf '%s' "$answer"
   fi
@@ -157,6 +181,7 @@ RAM_ALERT_PERCENT="${PI_REPORT_RAM_ALERT_PERCENT:-60}"
 ALERT_COOLDOWN_MINUTES="${PI_REPORT_ALERT_COOLDOWN_MINUTES:-30}"
 TELEGRAM_SILENT="${PI_REPORT_TELEGRAM_SILENT:-}"
 RUN_NOW="1"
+UNINSTALL="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -204,6 +229,10 @@ while [[ $# -gt 0 ]]; do
       RUN_NOW="0"
       shift
       ;;
+    --uninstall)
+      UNINSTALL="1"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -215,6 +244,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$UNINSTALL" == "1" ]]; then
+  uninstall_app
+  exit 0
+fi
 
 if [[ ! -f "$SOURCE_SCRIPT" ]]; then
   echo "Could not find ${SCRIPT_NAME} next to this installer." >&2
@@ -237,6 +271,7 @@ if [[ -t 0 ]]; then
   echo
   echo "Telegram setup"
   echo "Paste your bot token from @BotFather. The installer will store it in ${CONFIG_FILE}."
+  echo "The token is hidden while you type or paste it. That is normal: paste it, then press Enter."
   BOT_TOKEN="$(prompt_secret "Telegram bot token" "$BOT_TOKEN")"
   if [[ -z "$CHAT_ID" ]]; then
     echo

@@ -36,6 +36,8 @@ Run the installer:
 sudo bash install.sh
 ```
 
+When it asks for your Telegram bot token, your typing or pasted text will not appear on screen. That is normal. Paste the token, then press Enter.
+
 During installation it will ask for:
 
 - Your Telegram bot token
@@ -58,6 +60,8 @@ sudo bash install.sh \
   --ram-alert-percent 60 \
   --alert-cooldown 30
 ```
+
+Using `--token` is visible in your terminal command, so the guided installer is safer if someone else can see your screen.
 
 ## Telegram Setup
 
@@ -137,6 +141,24 @@ sudo systemctl daemon-reload
 sudo systemctl restart pi-system-report.timer
 sudo systemctl restart pi-system-report-alert.timer
 ```
+
+## Uninstall
+
+Remove the program, timers, services, settings, and alert state:
+
+```bash
+sudo bash install.sh --uninstall
+```
+
+This removes:
+
+- `/opt/pi-system-report`
+- `/etc/pi-system-report.env`
+- `/var/lib/pi-system-report`
+- `pi-system-report.service`
+- `pi-system-report.timer`
+- `pi-system-report-alert.service`
+- `pi-system-report-alert.timer`
 
 ## Useful Commands
 
