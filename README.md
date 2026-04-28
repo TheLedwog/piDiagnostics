@@ -38,6 +38,8 @@ sudo bash install.sh
 
 When it asks for your Telegram bot token, your typing or pasted text will not appear on screen. That is normal. Paste the token, then press Enter.
 
+If a prompt says an existing value was found, press Enter to keep it. Type or paste a new value only if you want to replace it.
+
 During installation it will ask for:
 
 - Your Telegram bot token

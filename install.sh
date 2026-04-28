@@ -26,6 +26,53 @@ fi
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_SCRIPT="${SCRIPT_DIR}/${SCRIPT_NAME}"
 
+if [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
+  C_RESET="$(tput sgr0 || true)"
+  C_BOLD="$(tput bold || true)"
+  C_DIM="$(tput dim || true)"
+  C_BLUE="$(tput setaf 4 || true)"
+  C_GREEN="$(tput setaf 2 || true)"
+  C_YELLOW="$(tput setaf 3 || true)"
+  C_RED="$(tput setaf 1 || true)"
+else
+  C_RESET=""
+  C_BOLD=""
+  C_DIM=""
+  C_BLUE=""
+  C_GREEN=""
+  C_YELLOW=""
+  C_RED=""
+fi
+
+line() {
+  printf '%s\n' "------------------------------------------------------------"
+}
+
+header() {
+  printf '\n%s%s%s\n' "$C_BOLD" "$1" "$C_RESET"
+  line
+}
+
+step() {
+  printf '\n%s[%s]%s %s%s%s\n' "$C_BLUE" "$1" "$C_RESET" "$C_BOLD" "$2" "$C_RESET"
+}
+
+info() {
+  printf '%s%s%s\n' "$C_DIM" "$1" "$C_RESET"
+}
+
+warn() {
+  printf '%s%s%s\n' "$C_YELLOW" "$1" "$C_RESET"
+}
+
+success() {
+  printf '%s%s%s\n' "$C_GREEN" "$1" "$C_RESET"
+}
+
+error() {
+  printf '%s%s%s\n' "$C_RED" "$1" "$C_RESET" >&2
+}
+
 usage() {
   cat <<USAGE
 Usage: sudo bash install.sh [options]
@@ -50,7 +97,8 @@ USAGE
 }
 
 uninstall_app() {
-  echo "Uninstalling ${APP_NAME}..."
+  header "Raspberry Pi System Report Uninstaller"
+  step "1/3" "Stopping services and timers"
 
   if command -v systemctl >/dev/null 2>&1; then
     systemctl disable --now "${APP_NAME}.timer" >/dev/null 2>&1 || true
@@ -59,17 +107,19 @@ uninstall_app() {
     systemctl stop "${APP_NAME}-alert.service" >/dev/null 2>&1 || true
   fi
 
+  step "2/3" "Removing installed files"
   rm -f "$SERVICE_FILE" "$TIMER_FILE" "$ALERT_SERVICE_FILE" "$ALERT_TIMER_FILE"
   rm -f "$CONFIG_FILE"
   rm -rf "$INSTALL_DIR" "$STATE_DIR"
 
+  step "3/3" "Reloading systemd"
   if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload
     systemctl reset-failed "${APP_NAME}.service" "${APP_NAME}.timer" \
       "${APP_NAME}-alert.service" "${APP_NAME}-alert.timer" >/dev/null 2>&1 || true
   fi
 
-  echo "Uninstalled ${APP_NAME}."
+  success "Uninstalled ${APP_NAME}."
 }
 
 escape_env_value() {
@@ -87,10 +137,17 @@ prompt_value() {
   local answer
 
   if [[ -n "$current" ]]; then
-    read -r -p "${prompt} [keep existing]: " answer
+    printf '\n%s\n' "$prompt" >&2
+    printf '  Existing value found: %s\n' "$current" >&2
+    printf '  Press Enter to keep it, or type/paste a new value.\n' >&2
+    printf '  > ' >&2
+    read -r answer
     printf '%s' "${answer:-$current}"
   else
-    read -r -p "${prompt}: " answer
+    printf '\n%s\n' "$prompt" >&2
+    printf '  Type/paste the value, then press Enter.\n' >&2
+    printf '  > ' >&2
+    read -r answer
     printf '%s' "$answer"
   fi
 }
@@ -101,12 +158,21 @@ prompt_secret() {
   local answer
 
   if [[ -n "$current" ]]; then
-    read -r -s -p "${prompt} [keep existing, hidden input]: " answer
-    echo >&2
+    printf '\n%s\n' "$prompt" >&2
+    printf '  Existing token found.\n' >&2
+    printf '  Press Enter to keep it, or paste a new token and press Enter.\n' >&2
+    printf '  Input is hidden, so nothing will appear while you type/paste.\n' >&2
+    printf '  > ' >&2
+    read -r -s answer
+    printf '\n' >&2
     printf '%s' "${answer:-$current}"
   else
-    read -r -s -p "${prompt} [hidden input]: " answer
-    echo >&2
+    printf '\n%s\n' "$prompt" >&2
+    printf '  Paste the token from @BotFather, then press Enter.\n' >&2
+    printf '  Input is hidden, so nothing will appear while you type/paste.\n' >&2
+    printf '  > ' >&2
+    read -r -s answer
+    printf '\n' >&2
     printf '%s' "$answer"
   fi
 }
@@ -251,58 +317,70 @@ if [[ "$UNINSTALL" == "1" ]]; then
 fi
 
 if [[ ! -f "$SOURCE_SCRIPT" ]]; then
-  echo "Could not find ${SCRIPT_NAME} next to this installer." >&2
-  echo "Copy install.sh and ${SCRIPT_NAME} to the same folder on your Raspberry Pi." >&2
+  error "Could not find ${SCRIPT_NAME} next to this installer."
+  error "Copy install.sh and ${SCRIPT_NAME} to the same folder on your Raspberry Pi."
   exit 1
 fi
 
 if ! command -v python3 >/dev/null 2>&1; then
-  echo "python3 is required but was not found. Install it with: sudo apt install python3" >&2
+  error "python3 is required but was not found. Install it with: sudo apt install python3"
   exit 1
 fi
 PYTHON_BIN="$(command -v python3)"
 
 if ! command -v systemctl >/dev/null 2>&1; then
-  echo "systemctl is required for the scheduled installer." >&2
+  error "systemctl is required for the scheduled installer."
   exit 1
 fi
 
 if [[ -t 0 ]]; then
-  echo
-  echo "Telegram setup"
-  echo "Paste your bot token from @BotFather. The installer will store it in ${CONFIG_FILE}."
-  echo "The token is hidden while you type or paste it. That is normal: paste it, then press Enter."
+  header "Raspberry Pi System Report Installer"
+  info "This will install Telegram reports plus CPU/RAM alerts."
+  info "Settings are saved in ${CONFIG_FILE}."
+
+  step "1/4" "Telegram bot token"
+  info "Get this from @BotFather in Telegram."
+  info "For safety, the token is hidden while you type or paste it."
   BOT_TOKEN="$(prompt_secret "Telegram bot token" "$BOT_TOKEN")"
+
   if [[ -z "$CHAT_ID" ]]; then
-    echo
-    echo "Now open Telegram, send any message to your bot, then press Enter here."
+    step "2/4" "Telegram chat ID"
+    info "Open Telegram and send any message to your bot, such as: hello"
+    info "After that, press Enter here and I will try to find your chat ID automatically."
     read -r -p "Press Enter after messaging the bot..."
     detected_chat_id="$(detect_chat_id "$BOT_TOKEN" || true)"
     if [[ -n "$detected_chat_id" ]]; then
-      echo "Found Telegram chat ID: ${detected_chat_id}"
+      success "Found Telegram chat ID: ${detected_chat_id}"
       CHAT_ID="$detected_chat_id"
     else
-      echo "I could not auto-detect the chat ID. You can paste it manually."
-      echo "Tip: open https://api.telegram.org/botYOUR_TOKEN/getUpdates and look for chat id."
+      warn "I could not auto-detect the chat ID."
+      info "Open https://api.telegram.org/botYOUR_TOKEN/getUpdates and look for chat id."
     fi
+  else
+    step "2/4" "Telegram chat ID"
+    info "A saved chat ID already exists."
   fi
   CHAT_ID="$(prompt_value "Telegram chat ID" "$CHAT_ID")"
-  echo
-  echo "Report and alert settings"
+
+  step "3/4" "Report schedule"
+  info "This controls full system reports, not urgent alerts."
   REPORT_EVERY_MINUTES="$(prompt_value "Send a report every how many minutes" "$REPORT_EVERY_MINUTES")"
+
+  step "4/4" "CPU/RAM alert settings"
+  info "Alerts are sent only when CPU or RAM crosses your chosen percentage."
   ALERT_EVERY_MINUTES="$(prompt_value "Check for CPU/RAM alerts every how many minutes" "$ALERT_EVERY_MINUTES")"
   CPU_ALERT_PERCENT="$(prompt_value "CPU alert percent" "$CPU_ALERT_PERCENT")"
   RAM_ALERT_PERCENT="$(prompt_value "RAM alert percent" "$RAM_ALERT_PERCENT")"
   ALERT_COOLDOWN_MINUTES="$(prompt_value "Minimum minutes between repeated alerts" "$ALERT_COOLDOWN_MINUTES")"
 else
   if [[ -z "$BOT_TOKEN" || -z "$CHAT_ID" ]]; then
-    echo "Non-interactive install needs --token and --chat-id, or PI_REPORT_TELEGRAM_* env vars." >&2
+    error "Non-interactive install needs --token and --chat-id, or PI_REPORT_TELEGRAM_* env vars."
     exit 2
   fi
 fi
 
 if [[ -z "$BOT_TOKEN" || -z "$CHAT_ID" ]]; then
-  echo "Telegram bot token and chat ID are required." >&2
+  error "Telegram bot token and chat ID are required."
   exit 2
 fi
 
@@ -315,7 +393,9 @@ require_positive_integer "PI_REPORT_INTERVAL" "$REPORT_INTERVAL"
 require_percent "--cpu-alert-percent" "$CPU_ALERT_PERCENT"
 require_percent "--ram-alert-percent" "$RAM_ALERT_PERCENT"
 
-echo "Installing ${APP_NAME}..."
+header "Installing"
+info "Program: ${INSTALL_DIR}/${SCRIPT_NAME}"
+info "Config:  ${CONFIG_FILE}"
 install -d -m 755 "$INSTALL_DIR"
 install -d -m 700 "$STATE_DIR"
 install -m 755 "$SOURCE_SCRIPT" "${INSTALL_DIR}/${SCRIPT_NAME}"
@@ -395,13 +475,14 @@ TIMER
 systemctl daemon-reload
 
 if [[ "$RUN_NOW" == "1" ]]; then
-  echo "Sending the first Telegram report now. This will take about ${REPORT_DURATION} seconds..."
+  step "Test" "Sending the first Telegram report now"
+  info "This will take about ${REPORT_DURATION} seconds."
   if ! systemctl start "${APP_NAME}.service"; then
     echo
-    echo "The first report failed. Recent logs:" >&2
+    error "The first report failed. Recent logs:"
     journalctl -u "${APP_NAME}.service" -n 40 --no-pager >&2 || true
     echo
-    echo "Fix ${CONFIG_FILE}, then test again with: sudo systemctl start ${APP_NAME}.service" >&2
+    error "Fix ${CONFIG_FILE}, then test again with: sudo systemctl start ${APP_NAME}.service"
     exit 1
   fi
 fi
@@ -409,22 +490,20 @@ fi
 systemctl enable --now "${APP_NAME}.timer" >/dev/null
 systemctl enable --now "${APP_NAME}-alert.timer" >/dev/null
 
-echo
-echo "Installed."
-echo "Timer:       ${APP_NAME}.timer"
-echo "Service:     ${APP_NAME}.service"
-echo "Alert timer: ${APP_NAME}-alert.timer"
-echo "Alert svc:   ${APP_NAME}-alert.service"
-echo "Config:      ${CONFIG_FILE}"
-echo "Program:     ${INSTALL_DIR}/${SCRIPT_NAME}"
-echo "Schedule:    every ${REPORT_EVERY_MINUTES} minutes"
-echo "Alerts:      CPU >= ${CPU_ALERT_PERCENT}% or RAM >= ${RAM_ALERT_PERCENT}%"
-echo "Alert check: every ${ALERT_EVERY_MINUTES} minutes, ${ALERT_COOLDOWN_MINUTES} minute cooldown"
-echo
-echo "Useful commands:"
-echo "  sudo systemctl start ${APP_NAME}.service"
-echo "  sudo systemctl start ${APP_NAME}-alert.service"
-echo "  systemctl status ${APP_NAME}.timer"
-echo "  systemctl status ${APP_NAME}-alert.timer"
-echo "  journalctl -u ${APP_NAME}.service -n 80 --no-pager"
-echo "  journalctl -u ${APP_NAME}-alert.service -n 80 --no-pager"
+header "Installed Successfully"
+success "Full reports and CPU/RAM alerts are now enabled."
+printf '  %-14s %s\n' "Reports:" "every ${REPORT_EVERY_MINUTES} minutes"
+printf '  %-14s %s\n' "Alerts:" "CPU >= ${CPU_ALERT_PERCENT}% or RAM >= ${RAM_ALERT_PERCENT}%"
+printf '  %-14s %s\n' "Alert check:" "every ${ALERT_EVERY_MINUTES} minutes"
+printf '  %-14s %s\n' "Cooldown:" "${ALERT_COOLDOWN_MINUTES} minutes"
+printf '  %-14s %s\n' "Config:" "${CONFIG_FILE}"
+printf '  %-14s %s\n' "Program:" "${INSTALL_DIR}/${SCRIPT_NAME}"
+
+header "Useful Commands"
+printf '  Send report now:    sudo systemctl start %s.service\n' "$APP_NAME"
+printf '  Check alerts now:   sudo systemctl start %s-alert.service\n' "$APP_NAME"
+printf '  Report timer:       systemctl status %s.timer\n' "$APP_NAME"
+printf '  Alert timer:        systemctl status %s-alert.timer\n' "$APP_NAME"
+printf '  Report logs:        journalctl -u %s.service -n 80 --no-pager\n' "$APP_NAME"
+printf '  Alert logs:         journalctl -u %s-alert.service -n 80 --no-pager\n' "$APP_NAME"
+printf '  Uninstall:          sudo bash install.sh --uninstall\n'
