@@ -33,6 +33,7 @@ from typing import Any
 PROC = Path("/proc")
 SYS = Path("/sys")
 TELEGRAM_MESSAGE_LIMIT = 3900
+DEFAULT_ALERT_STATE_FILE = "/var/lib/pi-system-report/alert-state.json"
 
 
 @dataclasses.dataclass
@@ -578,6 +579,44 @@ def send_telegram_message(
     return len(chunks)
 
 
+def read_json_file(path: Path) -> dict[str, Any]:
+    text = read_text(path)
+    if not text:
+        return {}
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def write_json_file(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    temporary_path.write_text(json.dumps(value, indent=2, sort_keys=True), encoding="utf-8")
+    temporary_path.replace(path)
+
+
+def env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if not value:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
 def get_telegram_credentials(args: argparse.Namespace) -> tuple[str | None, str | None]:
     bot_token = (
         args.telegram_token
@@ -788,6 +827,151 @@ def render_report(report: dict[str, Any]) -> str:
     return buffer.getvalue().rstrip()
 
 
+def find_alerts(report: dict[str, Any], cpu_threshold: float, ram_threshold: float) -> list[dict[str, Any]]:
+    metrics = report["metrics"]
+    alerts: list[dict[str, Any]] = []
+
+    cpu_percent = metrics["cpu"]["max_percent"]
+    if cpu_percent >= cpu_threshold:
+        alerts.append(
+            {
+                "type": "cpu",
+                "label": "CPU",
+                "value": cpu_percent,
+                "threshold": cpu_threshold,
+            }
+        )
+
+    ram_percent = metrics["memory"]["max_used_percent"]
+    if ram_percent >= ram_threshold:
+        alerts.append(
+            {
+                "type": "ram",
+                "label": "RAM",
+                "value": ram_percent,
+                "threshold": ram_threshold,
+            }
+        )
+
+    return alerts
+
+
+def render_alert(report: dict[str, Any], alerts: list[dict[str, Any]]) -> str:
+    info = report["system"]
+    metrics = report["metrics"]
+    cpu = metrics["cpu"]
+    memory = metrics["memory"]
+    lines = [
+        "Raspberry Pi alert",
+        "",
+        f"Host: {info['hostname']}",
+        f"Time: {info['timestamp']}",
+        f"Sample: {metrics['duration_seconds']}s",
+        "",
+        "Triggered:",
+    ]
+
+    for alert in alerts:
+        lines.append(f"- {alert['label']} hit {alert['value']}% (limit {alert['threshold']}%)")
+
+    lines.extend(
+        [
+            "",
+            f"CPU current: {cpu['current_percent'] if cpu['current_percent'] is not None else 'unknown'}%",
+            f"CPU average: {cpu['average_percent'] if cpu['average_percent'] is not None else 'unknown'}%",
+            f"CPU peak: {cpu['max_percent']}%",
+            f"RAM used: {format_bytes(memory['used_bytes'])} / {format_bytes(memory['total_bytes'])} ({memory['used_percent']}%)",
+            f"RAM peak: {memory['max_used_percent']}%",
+        ]
+    )
+
+    if cpu["temperature_c"] is not None:
+        lines.append(f"Temperature: {cpu['temperature_c']} C")
+    if info["ip_addresses"]:
+        lines.append(f"IP: {', '.join(info['ip_addresses'])}")
+
+    processes = metrics["top_processes_by_cpu"][:5]
+    if processes:
+        lines.extend(["", "Top CPU programs:"])
+        for process in processes:
+            command = process["command"]
+            if len(command) > 70:
+                command = command[:67] + "..."
+            lines.append(
+                f"- PID {process['pid']}: {process['cpu_percent']}% CPU, "
+                f"{format_bytes(process['memory_rss_bytes'])} RAM, {command}"
+            )
+
+    return "\n".join(lines)
+
+
+def should_send_alert(state: dict[str, Any], cooldown_minutes: int, now: float) -> tuple[bool, int]:
+    last_alert_at = state.get("last_alert_at")
+    if not isinstance(last_alert_at, (int, float)):
+        return True, 0
+    cooldown_seconds = max(0, cooldown_minutes) * 60
+    next_allowed_at = int(last_alert_at + cooldown_seconds)
+    if now >= next_allowed_at:
+        return True, 0
+    return False, max(0, next_allowed_at - int(now))
+
+
+def handle_alert_mode(args: argparse.Namespace, report: dict[str, Any]) -> int:
+    bot_token, chat_id = get_telegram_credentials(args)
+    if not bot_token or not chat_id:
+        print(
+            "Alert mode needs PI_REPORT_TELEGRAM_BOT_TOKEN and "
+            "PI_REPORT_TELEGRAM_CHAT_ID, or --telegram-token and --telegram-chat-id.",
+            file=sys.stderr,
+        )
+        return 2
+
+    alerts = find_alerts(report, args.cpu_alert_percent, args.ram_alert_percent)
+    if not alerts:
+        print(
+            "No alert sent. "
+            f"CPU peak {report['metrics']['cpu']['max_percent']}% "
+            f"and RAM peak {report['metrics']['memory']['max_used_percent']}% "
+            "are below the configured limits."
+        )
+        return 0
+
+    now = time.time()
+    state_path = Path(args.alert_state_file)
+    state = read_json_file(state_path)
+    can_send, wait_seconds = should_send_alert(state, args.alert_cooldown_minutes, now)
+    if not can_send:
+        print(
+            "Alert threshold is still breached, but no Telegram message was sent "
+            f"because cooldown has {format_duration(wait_seconds)} remaining."
+        )
+        return 0
+
+    message = render_alert(report, alerts)
+    try:
+        message_count = send_telegram_message(
+            bot_token,
+            chat_id,
+            message,
+            silent=args.telegram_silent,
+        )
+    except RuntimeError as exc:
+        print(f"Telegram alert failed: {exc}", file=sys.stderr)
+        return 1
+
+    state["last_alert_at"] = now
+    state["last_alerts"] = alerts
+    state["last_hostname"] = report["system"]["hostname"]
+    try:
+        write_json_file(state_path, state)
+    except OSError as exc:
+        print(f"Telegram alert sent, but state file could not be saved: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Telegram alert sent ({message_count} message{'s' if message_count != 1 else ''}).")
+    return 0
+
+
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "system": collect_static_info(),
@@ -840,6 +1024,34 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Send Telegram messages without a notification sound.",
     )
+    parser.add_argument(
+        "--alert-only",
+        action="store_true",
+        help="Only send Telegram if CPU or RAM crosses the alert limits.",
+    )
+    parser.add_argument(
+        "--cpu-alert-percent",
+        type=float,
+        default=env_float("PI_REPORT_CPU_ALERT_PERCENT", 60.0),
+        help="CPU percent that triggers Telegram alerts. Default: 60.",
+    )
+    parser.add_argument(
+        "--ram-alert-percent",
+        type=float,
+        default=env_float("PI_REPORT_RAM_ALERT_PERCENT", 60.0),
+        help="RAM percent that triggers Telegram alerts. Default: 60.",
+    )
+    parser.add_argument(
+        "--alert-cooldown-minutes",
+        type=int,
+        default=env_int("PI_REPORT_ALERT_COOLDOWN_MINUTES", 30),
+        help="Minimum minutes between alert messages while usage stays high. Default: 30.",
+    )
+    parser.add_argument(
+        "--alert-state-file",
+        default=os.getenv("PI_REPORT_ALERT_STATE_FILE", DEFAULT_ALERT_STATE_FILE),
+        help=f"Where alert cooldown state is stored. Default: {DEFAULT_ALERT_STATE_FILE}.",
+    )
     return parser.parse_args()
 
 
@@ -848,9 +1060,23 @@ def main() -> int:
     if args.top < 1:
         print("--top must be at least 1", file=sys.stderr)
         return 2
+    if not 0 <= args.cpu_alert_percent <= 100:
+        print("--cpu-alert-percent must be between 0 and 100", file=sys.stderr)
+        return 2
+    if not 0 <= args.ram_alert_percent <= 100:
+        print("--ram-alert-percent must be between 0 and 100", file=sys.stderr)
+        return 2
+    if args.alert_cooldown_minutes < 0:
+        print("--alert-cooldown-minutes must be 0 or greater", file=sys.stderr)
+        return 2
 
     report = build_report(args)
     text_report = render_report(report)
+
+    if args.alert_only:
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        return handle_alert_mode(args, report)
 
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
