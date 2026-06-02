@@ -1,0 +1,7 @@
+# Force LF on files that run on the Raspberry Pi (Linux),
+# so Windows checkouts can't introduce CRLF and break them.
+*.sh   text eol=lf
+*.py   text eol=lf
+
+# Let everything else use git's default handling
+* text=auto
