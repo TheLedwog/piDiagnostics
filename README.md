@@ -162,6 +162,21 @@ This removes:
 - `pi-system-report-alert.service`
 - `pi-system-report-alert.timer`
 
+### Uninstall without install.sh
+
+If you only want to remove things and do not have `install.sh` on the Pi, copy
+the standalone `uninstall.sh` over by itself:
+
+```bash
+scp uninstall.sh pi@YOUR_PI_IP:~
+ssh pi@YOUR_PI_IP
+sudo bash uninstall.sh
+```
+
+It lists exactly what it will delete and asks for confirmation first. Add
+`--yes` to skip the prompt. It removes the same files, timers, services,
+settings, and alert state as `install.sh --uninstall`.
+
 ## Useful Commands
 
 Send a full report now:
